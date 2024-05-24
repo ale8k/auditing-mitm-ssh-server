@@ -3,6 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+
+	"github.com/juju/zaputil/zapctx"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Steps to test this:
@@ -10,6 +15,17 @@ import (
 // 2. Test ssh with your custom user via: ssh -i ./ssh/key test@$(multipass ls --format json | jq -r '.list[] | select(.name == "test") | .ipv4[0]')
 // 3. Run a command ssh 127.0.0.1 -p 2222
 func main() {
+	config := zap.NewDevelopmentEncoderConfig()
+	config.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	config.EncodeTime = nil
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(config),
+		zapcore.AddSync(os.Stdout),
+		zapctx.LogLevel,
+	)
+	zapctx.Default = zap.New(core)
+	zapctx.LogLevel.SetLevel(zapcore.DebugLevel)
+
 	auditLogger := NewSSHAuditLogger()
 	mitmServer := NewMITMAuditingSSHServer(auditLogger)
 

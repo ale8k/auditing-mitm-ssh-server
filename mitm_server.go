@@ -1,11 +1,13 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"io"
 	"strings"
 
 	gliderssh "github.com/gliderlabs/ssh"
+	"github.com/juju/zaputil/zapctx"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -64,6 +66,7 @@ func NewMITMAuditingSSHServer(l SSHAuditLogger) *MITMAuditingSSHServer {
 type MITMAuditingSSHServer struct {
 	server      *gliderssh.Server
 	auditLogger SSHAuditLogger
+	logger      *zap.Logger
 }
 
 // Start starts the SSH server.
@@ -88,16 +91,13 @@ func (m *MITMAuditingSSHServer) handleSSHTargetWindowChanges(
 //
 // 1. Forwards the MITM's client's input into the target session.
 // 2. Forwards the MITM's client's input into the provided input channel for auditing and interception purposes.
-func (m *MITMAuditingSSHServer) forward(stdinPipe io.WriteCloser, sess gliderssh.Session, inputChan chan<- []byte) {
+func (m *MITMAuditingSSHServer) forward(ctx context.Context, stdinPipe io.WriteCloser, sess gliderssh.Session, inputChan chan<- []byte) {
 	buf := make([]byte, 10)
 
 	for {
 		n, err := sess.Read(buf)
 		if err != nil {
-			// HANDLE BREAKS, DON'T DO THIS
-			fmt.Println("Closing glider connection")
-			fmt.Println(fmt.Errorf("failed to read: %w", err))
-			sess.Close()
+			zapctx.Error(ctx, "error reading from mitm session", zap.Error(err))
 			return
 		}
 		if n > 0 {
@@ -105,9 +105,7 @@ func (m *MITMAuditingSSHServer) forward(stdinPipe io.WriteCloser, sess gliderssh
 			inputChan <- input
 
 			if _, err := stdinPipe.Write([]byte(input)); err != nil {
-				fmt.Println("Closing glider connection")
-				fmt.Println(fmt.Errorf("input write error occured: %w", err))
-				fmt.Println(sess.Close())
+				zapctx.Error(ctx, "error writing stdin pipe", zap.Error(err))
 				return
 			}
 		}
@@ -117,17 +115,27 @@ func (m *MITMAuditingSSHServer) forward(stdinPipe io.WriteCloser, sess gliderssh
 
 func (m *MITMAuditingSSHServer) setHandler() {
 	m.server.Handle(func(s gliderssh.Session) {
+		ctx := s.Context()
+
 		// TODO: how do we know which machine to forward to?
 		targetConn, err := getTargetConnection()
 		if err != nil {
-			fmt.Println(newSshSessionError("get target connection and settings failed", s, err))
+			zapctx.Error(
+				ctx,
+				"get target connection and settings failed",
+				zap.Error(err),
+			)
 			return
 		}
 		defer targetConn.Close()
 
 		targetSession, err := targetConn.NewSession()
 		if err != nil {
-			fmt.Println(newSshSessionError("failed to create target session", s, err))
+			zapctx.Error(
+				ctx,
+				"failed to create target session",
+				zap.Error(err),
+			)
 			return
 		}
 		defer targetSession.Close()
@@ -146,20 +154,29 @@ func (m *MITMAuditingSSHServer) setHandler() {
 				ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
 			}
 			if err := targetSession.RequestPty(ptyReq.Term, ptyReq.Window.Height, ptyReq.Window.Width, modes); err != nil {
-				fmt.Println(newSshSessionError("target session request pty failed", s, err))
+				zapctx.Error(
+					ctx,
+					"target session request pty failed",
+					zap.Error(err),
+				)
 				return
 			}
 
-			fmt.Println("Debug: Piping")
-
-			fmt.Println("Debug: Stdin Pipe")
+			zapctx.Debug(ctx, "piping")
+			zapctx.Debug(ctx, "starting stdin pipe...")
 			stdinPipe, err := targetSession.StdinPipe()
 			if err != nil {
-				fmt.Println(newSshSessionError("failed to get target session stdin pipe", s, err))
+				zapctx.Error(
+					ctx,
+					"failed to get target session stdin pipe",
+					zap.Error(err),
+				)
 				return
 			}
 			inputChan := make(chan []byte)
-			go m.forward(stdinPipe, s, inputChan)
+
+			zapctx.Debug(ctx, "starting input forwarding...")
+			go m.forward(ctx, stdinPipe, s, inputChan)
 
 			// Audit Logger interception.
 			go m.auditLogger.ReceiveInput(inputChan, SessionDetails{
@@ -174,9 +191,13 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			targetSession.Stdout = s
 			targetSession.Stderr = s.Stderr()
 
-			fmt.Println("Debug: Starting login shell")
+			zapctx.Debug(ctx, "getting login shell...")
 			if err := targetSession.Shell(); err != nil {
-				fmt.Println(newSshSessionError("failed to start login shell", s, err))
+				zapctx.Error(
+					ctx,
+					"failed to start login shell",
+					zap.Error(err),
+				)
 				return
 			}
 
@@ -185,18 +206,27 @@ func (m *MITMAuditingSSHServer) setHandler() {
 				targetSession,
 			)
 
-			fmt.Println("Debug: Waiting for remote session to exit")
+			zapctx.Debug(ctx, "waiting for remote session to exit")
 			if err := targetSession.Wait(); err != nil {
-				fmt.Println(newSshSessionError("remote session exit failed", s, err))
+				zapctx.Error(
+					ctx,
+					"remote session exit failed",
+					zap.Error(err),
+				)
 				return
 			}
-			fmt.Println("Debug: Remote session exited")
+			zapctx.Debug(ctx, "remote session exited")
 		} else {
 			command := s.Command()
-			fmt.Printf("Executing command on target SSH server: %s", command)
+
+			zapctx.Debug(ctx, "executing command on target SSH server", zap.Any("command", command))
 			out, err := targetSession.CombinedOutput(strings.Join(command, " "))
 			if err != nil {
-				fmt.Println(newSshSessionError("failed to execute command", s, err))
+				zapctx.Error(
+					ctx,
+					"failed to execute command",
+					zap.Error(err),
+				)
 				return
 			}
 			io.WriteString(s, string(out))
