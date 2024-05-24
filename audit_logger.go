@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/juju/zaputil/zapctx"
 )
 
 func NewSSHAuditLogger() *sshAuditLogger {
@@ -37,7 +40,7 @@ func (l *sshAuditLogger) ReceiveInput(inputChan <-chan []byte, sess SessionDetai
 		inputBuffer.Write(input)
 
 		if bytes.ContainsRune(input, '\r') {
-			fmt.Println("Log being sent")
+			zapctx.Debug(context.TODO(), "Log being sent")
 			l.sendLog(inputBuffer, sess)
 		}
 	}
@@ -58,7 +61,7 @@ func (l *sshAuditLogger) sendLog(inputBuffer *bytes.Buffer, sess SessionDetails)
 		Timestamp:     time.Now(),
 	}
 	l.logs = append(l.logs, log)
-	fmt.Println("Log created")
+	zapctx.Debug(context.TODO(), "Log created")
 	loggylog, _ := json.MarshalIndent(log, "", " ")
 	fmt.Println(string(loggylog))
 	inputBuffer.Reset()
