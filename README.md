@@ -6,7 +6,7 @@ See `mitm_server.go` for the packaged SSH server.
 It is expected you bring your own `SSHAuditLogger` implementation for collection and persistence of the 
 logs.
 
-The receive logs may look like:
+The receive logs from a PTY, it may look like:
 ```go
 func (l *sshAuditLogger) ReceiveInput(inputChan <-chan []byte, sess SessionDetails) {
 	inputBuffer := &bytes.Buffer{}
@@ -20,6 +20,14 @@ func (l *sshAuditLogger) ReceiveInput(inputChan <-chan []byte, sess SessionDetai
 			inputBuffer.Reset()
 		}
 	}
+}
+```
+
+To receive logs from a single command, it may look like:
+```go
+func (l *sshAuditLogger) ReceiveCommandInput(sess SessionDetails) {
+	b, _ := json.MarshalIndent(sess, "", " ")
+	fmt.Println(string(b))
 }
 ```
 
