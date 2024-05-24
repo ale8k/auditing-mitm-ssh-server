@@ -10,10 +10,6 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// Steps to test this:
-// 1. Launch mp vm via: multipass launch --cloud-init cloud-init.yaml --name test
-// 2. Test ssh with your custom user via: ssh -i ./ssh/key test@$(multipass ls --format json | jq -r '.list[] | select(.name == "test") | .ipv4[0]')
-// 3. Run a command ssh 127.0.0.1 -p 2222
 func main() {
 	config := zap.NewDevelopmentEncoderConfig()
 	config.EncodeLevel = zapcore.CapitalColorLevelEncoder

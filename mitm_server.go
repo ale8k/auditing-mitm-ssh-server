@@ -17,6 +17,19 @@ type SSHAuditLogger interface {
 	// ReceiveInput takes an inputChan, which sends input as it comes directly
 	// from the client connected to the MITM server. It is called ONCE per SSH session
 	// and additionally returns the Client's SSH session details.
+	//
+	// An example receive input may look like:
+	// func (l *sshAuditLogger) ReceiveInput(inputChan <-chan []byte, sess SessionDetails) {
+	// 	inputBuffer := &bytes.Buffer{}
+	// 	for input := range inputChan {
+	// 		inputBuffer.Write(input)
+	// 		// Check for a command sent
+	// 		if bytes.ContainsRune(input, '\r') {
+	// 			io.Discard.Write(inputBuffer.Bytes())
+	// 			inputBuffer.Reset()
+	// 		}
+	// 	}
+	// }
 	ReceiveInput(inputChan <-chan []byte, sess SessionDetails)
 }
 
