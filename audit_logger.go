@@ -34,7 +34,12 @@ type sshAuditLog struct {
 	Timestamp     time.Time
 }
 
-func (l *sshAuditLogger) ReceiveInput(inputChan <-chan []byte, sess SessionDetails) {
+func (l *sshAuditLogger) ReceiveCommandInput(sess SessionDetails) {
+	b, _ := json.MarshalIndent(sess, "", " ")
+	fmt.Println(string(b))
+}
+
+func (l *sshAuditLogger) ReceivePTYInput(inputChan <-chan []byte, sess SessionDetails) {
 	inputBuffer := &bytes.Buffer{}
 	for input := range inputChan {
 		inputBuffer.Write(input)

@@ -30,7 +30,11 @@ type SSHAuditLogger interface {
 	// 		}
 	// 	}
 	// }
-	ReceiveInput(inputChan <-chan []byte, sess SessionDetails)
+	ReceivePTYInput(inputChan <-chan []byte, sess SessionDetails)
+
+	// ReceiveCommandInput sends a session details as is, and the command used can be extracted
+	// from the "ShellCommand" field.
+	ReceiveCommandInput(sess SessionDetails)
 }
 
 // SessionDetails contains the client's details for this SSH session.
@@ -79,7 +83,6 @@ func NewMITMAuditingSSHServer(l SSHAuditLogger) *MITMAuditingSSHServer {
 type MITMAuditingSSHServer struct {
 	server      *gliderssh.Server
 	auditLogger SSHAuditLogger
-	logger      *zap.Logger
 }
 
 // Start starts the SSH server.
@@ -97,6 +100,17 @@ func (m *MITMAuditingSSHServer) handleSSHTargetWindowChanges(
 ) {
 	for change := range ptyWindowChangeCh {
 		targetSession.WindowChange(change.Height, change.Width)
+	}
+}
+
+func (m *MITMAuditingSSHServer) createSessionDetails(s gliderssh.Session) SessionDetails {
+	return SessionDetails{
+		ShellCommand:  s.Command(),
+		Environ:       s.Environ(),
+		ClientAddr:    s.RemoteAddr().String(),
+		ClientVersion: s.Context().ClientVersion(),
+		User:          s.User(),
+		SessionID:     s.Context().SessionID(),
 	}
 }
 
@@ -130,7 +144,21 @@ func (m *MITMAuditingSSHServer) setHandler() {
 	m.server.Handle(func(s gliderssh.Session) {
 		ctx := s.Context()
 
+		var ptyReq gliderssh.Pty
+		var ptyWindowChangeCh <-chan gliderssh.Window
+		var isPty bool
+		if len(s.Command()) == 0 {
+			ptyReq, ptyWindowChangeCh, isPty = s.Pty()
+		}
+
 		// TODO: how do we know which machine to forward to?
+		// One idea is take the ssh argument:
+		// ssh user@mitm-server.com -p 2222 my-place-i-wanna-ssh-to
+		// Do some auth checks
+		// And if any commands are after the first shell arg, perform an exec
+		// otherwise PTY?
+		//
+		// TODO(ale8k): No matter which route, make this pluggable into the MITM server
 		targetConn, err := getTargetConnection()
 		if err != nil {
 			zapctx.Error(
@@ -152,13 +180,6 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			return
 		}
 		defer targetSession.Close()
-
-		var ptyReq gliderssh.Pty
-		var ptyWindowChangeCh <-chan gliderssh.Window
-		var isPty bool
-		if len(s.Command()) == 0 {
-			ptyReq, ptyWindowChangeCh, isPty = s.Pty()
-		}
 
 		if isPty {
 			modes := ssh.TerminalModes{
@@ -192,14 +213,7 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			go m.forward(ctx, stdinPipe, s, inputChan)
 
 			// Audit Logger interception.
-			go m.auditLogger.ReceiveInput(inputChan, SessionDetails{
-				ShellCommand:  s.Command(),
-				Environ:       s.Environ(),
-				ClientAddr:    s.RemoteAddr().String(),
-				ClientVersion: s.Context().ClientVersion(),
-				User:          s.User(),
-				SessionID:     s.Context().SessionID(),
-			})
+			go m.auditLogger.ReceivePTYInput(inputChan, m.createSessionDetails(s))
 
 			targetSession.Stdout = s
 			targetSession.Stderr = s.Stderr()
@@ -231,7 +245,7 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			zapctx.Debug(ctx, "remote session exited")
 		} else {
 			command := s.Command()
-
+			m.auditLogger.ReceiveCommandInput(m.createSessionDetails(s))
 			zapctx.Debug(ctx, "executing command on target SSH server", zap.Any("command", command))
 			out, err := targetSession.CombinedOutput(strings.Join(command, " "))
 			if err != nil {
