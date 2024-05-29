@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	gliderssh "github.com/gliderlabs/ssh"
@@ -10,6 +14,33 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )
+
+// SessionDetails contains the client's details for this SSH session.
+type SessionDetails struct {
+	// Command returns a shell parsed slice of arguments that were provided by the user.
+	// Shell parsing splits the command string according to POSIX shell rules,
+	// which considers quoting not just whitespace.
+	ShellCommand []string
+
+	// Environ returns a copy of strings representing the environment set by the user
+	// for this session, in the form "key=value".
+	Environ []string
+
+	// ClientAddr is the remote client address.
+	ClientAddr string
+
+	// ClientVersion is the client's SSH client version.
+	ClientVersion string
+
+	// User is the user the client is connecting as.
+	User string
+
+	// SessionID is a hash identifier for the session.
+	SessionID string
+}
+
+type TargetResolver interface {
+}
 
 // SSHAuditLogger is a service capable of implementing the "ReceiveInput" method.
 // For input audit logging purposes within a MITM SSH server.
@@ -37,64 +68,94 @@ type SSHAuditLogger interface {
 	ReceiveCommandInput(sess SessionDetails)
 }
 
-// SessionDetails contains the client's details for this SSH session.
-type SessionDetails struct {
-	// Command returns a shell parsed slice of arguments that were provided by the user.
-	// Shell parsing splits the command string according to POSIX shell rules,
-	// which considers quoting not just whitespace.
-	ShellCommand []string
-
-	// Environ returns a copy of strings representing the environment set by the user
-	// for this session, in the form "key=value".
-	Environ []string
-
-	// ClientAddr is the remote client address.
-	ClientAddr string
-
-	// ClientVersion is the client's SSH client version.
-	ClientVersion string
-
-	// User is the user the client is connecting as.
-	User string
-
-	// SessionID is a hash identifier for the session.
-	SessionID string
+func ensureHandlers(srv *gliderssh.Server) {
+	if srv.RequestHandlers == nil {
+		srv.RequestHandlers = map[string]gliderssh.RequestHandler{}
+		for k, v := range gliderssh.DefaultRequestHandlers {
+			srv.RequestHandlers[k] = v
+		}
+	}
+	if srv.ChannelHandlers == nil {
+		srv.ChannelHandlers = map[string]gliderssh.ChannelHandler{}
+		for k, v := range gliderssh.DefaultChannelHandlers {
+			srv.ChannelHandlers[k] = v
+		}
+	}
+	if srv.SubsystemHandlers == nil {
+		srv.SubsystemHandlers = map[string]gliderssh.SubsystemHandler{}
+		for k, v := range gliderssh.DefaultSubsystemHandlers {
+			srv.SubsystemHandlers[k] = v
+		}
+	}
 }
 
-// NewMITMAuditingSSHServer returns a new MITMAuditingSSHServer, it takes
+// NewMITMAuditingSSHServerWithHTTP returns a new MITMAuditingSSHServerWithHTTP, it takes
 // an SSHAuditLogger to allow logging of user's input from the client side.
-func NewMITMAuditingSSHServer(l SSHAuditLogger) *MITMAuditingSSHServer {
-	mitm := &MITMAuditingSSHServer{
-		server: &gliderssh.Server{
-			Addr: ":2222",
-			// SubsystemHandlers: map[string]gliderssh.SubsystemHandler{
-			// 	"sftp": sftpHandler,
-			// 	"scp":  sftpHandler,
-			// },
+func NewMITMAuditingSSHServerWithHTTP(l SSHAuditLogger) *MITMAuditingSSHServerWithHTTP {
+	mux := http.NewServeMux()
+	mitm := &MITMAuditingSSHServerWithHTTP{
+		srv: &http.Server{
+			Handler: mux,
+			Addr:    ":17070",
 		},
 		auditLogger: l,
 	}
-	mitm.setHandler()
+
+	mux.HandleFunc("/ssh", func(w http.ResponseWriter, r *http.Request) {
+		// Check if the request is a CONNECT method
+		if r.Method != http.MethodConnect {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+			return
+		}
+
+		clientConn, _, err := hijacker.Hijack()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		_, err = clientConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+		if err != nil {
+			clientConn.Close()
+			return
+		}
+		fmt.Println("finished connect")
+		gSrv := gliderssh.Server{}
+		// Get rid of the keys, not needed as we doing http -> ssh
+		pkey, _ := rsa.GenerateKey(rand.Reader, 4096)
+		key, _ := ssh.NewSignerFromKey(pkey)
+		gSrv.AddHostKey(key)
+
+		ensureHandlers(&gSrv)
+		gSrv.Handler = mitm.sshHandlerClosure(r)
+		gSrv.HandleConn(clientConn)
+	})
+
 	return mitm
 }
 
-// MITMAuditingSSHServer is a man-in-the-middle SSH server capable of
+// MITMAuditingSSHServerWithHTTP is a man-in-the-middle SSH server capable of
 // auditing users input.
-type MITMAuditingSSHServer struct {
-	server      *gliderssh.Server
+type MITMAuditingSSHServerWithHTTP struct {
+	srv         *http.Server
 	auditLogger SSHAuditLogger
 }
 
 // Start starts the SSH server.
-func (m *MITMAuditingSSHServer) Start() error {
-	return m.server.ListenAndServe()
+func (m *MITMAuditingSSHServerWithHTTP) Start() error {
+	return m.srv.ListenAndServe()
 }
 
 // handleSSHTargetWindowChanges takes the internal SSH servers channel of window changes
 // and updates the target sessions window.
 //
 // This is expected to be run in a separate routine!
-func (m *MITMAuditingSSHServer) handleSSHTargetWindowChanges(
+func (m *MITMAuditingSSHServerWithHTTP) handleSSHTargetWindowChanges(
 	ptyWindowChangeCh <-chan gliderssh.Window,
 	targetSession *ssh.Session,
 ) {
@@ -103,7 +164,7 @@ func (m *MITMAuditingSSHServer) handleSSHTargetWindowChanges(
 	}
 }
 
-func (m *MITMAuditingSSHServer) createSessionDetails(s gliderssh.Session) SessionDetails {
+func (m *MITMAuditingSSHServerWithHTTP) createSessionDetails(s gliderssh.Session) SessionDetails {
 	return SessionDetails{
 		ShellCommand:  s.Command(),
 		Environ:       s.Environ(),
@@ -118,7 +179,7 @@ func (m *MITMAuditingSSHServer) createSessionDetails(s gliderssh.Session) Sessio
 //
 // 1. Forwards the MITM's client's input into the target session.
 // 2. Forwards the MITM's client's input into the provided input channel for auditing and interception purposes.
-func (m *MITMAuditingSSHServer) forward(ctx context.Context, stdinPipe io.WriteCloser, sess gliderssh.Session, inputChan chan<- []byte) {
+func (m *MITMAuditingSSHServerWithHTTP) forward(ctx context.Context, stdinPipe io.WriteCloser, sess gliderssh.Session, inputChan chan<- []byte) {
 	buf := make([]byte, 10)
 
 	for {
@@ -140,9 +201,11 @@ func (m *MITMAuditingSSHServer) forward(ctx context.Context, stdinPipe io.WriteC
 	}
 }
 
-func (m *MITMAuditingSSHServer) setHandler() {
-	m.server.Handle(func(s gliderssh.Session) {
+func (m *MITMAuditingSSHServerWithHTTP) sshHandlerClosure(r *http.Request) func(s gliderssh.Session) {
+	return func(s gliderssh.Session) {
 		ctx := s.Context()
+
+		zapctx.Debug(ctx, "thing", zap.String("url", r.URL.String()))
 
 		var ptyReq gliderssh.Pty
 		var ptyWindowChangeCh <-chan gliderssh.Window
@@ -151,14 +214,6 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			ptyReq, ptyWindowChangeCh, isPty = s.Pty()
 		}
 
-		// TODO: how do we know which machine to forward to?
-		// One idea is take the ssh argument:
-		// ssh user@mitm-server.com -p 2222 my-place-i-wanna-ssh-to
-		// Do some auth checks
-		// And if any commands are after the first shell arg, perform an exec
-		// otherwise PTY?
-		//
-		// TODO(ale8k): No matter which route, make this pluggable into the MITM server
 		targetConn, err := getTargetConnection()
 		if err != nil {
 			zapctx.Error(
@@ -258,5 +313,5 @@ func (m *MITMAuditingSSHServer) setHandler() {
 			}
 			io.WriteString(s, string(out))
 		}
-	})
+	}
 }

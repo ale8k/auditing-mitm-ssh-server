@@ -9,6 +9,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// /model/<uuid>/machine/<number>/lxd/<number>/lxd/<number>/ssh
+// /model/<uuid>/application/<name>/unit/<number>/ssh?container=<container name>
 func getTargetConnection() (*ssh.Client, error) {
 	// Get IP
 	cmd := exec.Command("sh", "-c", "multipass ls --format json | jq -r '.list[] | select(.name == \"test\") | .ipv4[0]'")

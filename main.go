@@ -23,10 +23,11 @@ func main() {
 	zapctx.LogLevel.SetLevel(zapcore.DebugLevel)
 
 	auditLogger := NewSSHAuditLogger()
-	mitmServer := NewMITMAuditingSSHServer(auditLogger)
+	mitmServer := NewMITMAuditingSSHServerWithHTTP(auditLogger)
 
 	fmt.Println("starting ssh server on port 2222...")
 	log.Fatal(mitmServer.Start())
+
 }
 
 // func sftpHandler(s gliderssh.Session) {

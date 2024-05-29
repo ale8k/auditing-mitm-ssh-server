@@ -1,4 +1,4 @@
-# Auditing MITM SSH Server
+# Auditing MITM SSH Server with HTTP CONNECT SSH
 This repository contains a packaged auditing capable SSH server.
 
 See `mitm_server.go` for the packaged SSH server.
@@ -34,4 +34,4 @@ func (l *sshAuditLogger) ReceiveCommandInput(sess SessionDetails) {
 Steps to test this:
 1. Launch mp vm via: `multipass launch --cloud-init cloud-init.yaml --name test`
 2. Test ssh with your custom user via: `ssh -i ./ssh/key test@$(multipass ls --format json | jq -r '.list[] | select(.name == "test") | .ipv4[0]')`
-3. Run a command: `ssh 127.0.0.1 -p 2222`
+3. Run a command: `go run ./cmd/client`
